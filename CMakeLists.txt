@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Threading support removed for minimal implementation
+
 option(ENABLE_DEV_SETUP "Install pre-commit hook" ON)
 
 if(ENABLE_DEV_SETUP)
@@ -27,6 +29,12 @@ include_directories(include)
 
 file(GLOB_RECURSE SRC_FILES
     src/**/*.cpp
+)
+
+# Add error handling system files
+list(APPEND SRC_FILES
+    src/engine/error_aware_engine.cpp
+    src/execution/error_aware_executor.cpp
 )
 
 set(FLOX ${PROJECT_NAME})

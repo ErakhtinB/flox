@@ -56,6 +56,7 @@ add_flox_test(test_engine_smoke)
 add_flox_test(test_decimal)
 add_flox_test(test_order_execution_bus)
 add_flox_test(test_event_bus_instantiation)
+add_flox_test(test_error_system)
 
 add_flox_sync_test(test_sync_order_execution_bus)
 add_flox_sync_test(test_sync_market_data_bus)

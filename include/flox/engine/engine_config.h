@@ -43,6 +43,9 @@ struct EngineConfig
 
   std::string logLevel = "info";
   std::string logFile;
+
+  // Error handling configuration
+  size_t maxErrorsPerCategory = 1000;
 };
 
 }  // namespace flox
