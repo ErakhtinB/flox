@@ -1,5 +1,5 @@
 /*
- * Flox Engine
+ * Flox Engine - Order Executor Implementation
  * Developed by Evgenii Makarov (https://github.com/eeiaao)
  *
  * Copyright (c) 2025 Evgenii Makarov
@@ -7,7 +7,7 @@
  * license information.
  */
 
-#include "flox/execution/error_aware_executor.h"
+#include "flox/execution/order_executor.h"
 
 #include <format>
 #include <future>
@@ -17,14 +17,14 @@
 namespace flox
 {
 
-ErrorAwareOrderExecutor::ErrorAwareOrderExecutor(const Config& config)
+OrderExecutor::OrderExecutor(const Config& config)
     : _config(config)
 {
   _healthStatus.lastActivity = std::chrono::steady_clock::now();
   _healthStatus.lastSuccessfulSubmission = std::chrono::steady_clock::now();
 }
 
-Result<OrderId> ErrorAwareOrderExecutor::submitOrder(const Order& order)
+Result<OrderId> OrderExecutor::submitOrder(const Order& order)
 {
   auto startTime = std::chrono::high_resolution_clock::now();
 
@@ -138,7 +138,7 @@ Result<OrderId> ErrorAwareOrderExecutor::submitOrder(const Order& order)
   return result;
 }
 
-VoidResult ErrorAwareOrderExecutor::cancelOrder(OrderId orderId)
+VoidResult OrderExecutor::cancelOrder(OrderId orderId)
 {
   {
     std::shared_lock lock(_orderMutex);
@@ -182,7 +182,7 @@ VoidResult ErrorAwareOrderExecutor::cancelOrder(OrderId orderId)
   return result;
 }
 
-Result<OrderId> ErrorAwareOrderExecutor::modifyOrder(OrderId orderId, Price newPrice, Quantity newQuantity)
+Result<OrderId> OrderExecutor::modifyOrder(OrderId orderId, Price newPrice, Quantity newQuantity)
 {
   {
     std::shared_lock lock(_orderMutex);
@@ -238,7 +238,7 @@ Result<OrderId> ErrorAwareOrderExecutor::modifyOrder(OrderId orderId, Price newP
   return result;
 }
 
-Result<OrderStatus> ErrorAwareOrderExecutor::getOrderStatus(OrderId orderId) const
+Result<OrderStatus> OrderExecutor::getOrderStatus(OrderId orderId) const
 {
   {
     std::shared_lock lock(_orderMutex);
@@ -252,7 +252,7 @@ Result<OrderStatus> ErrorAwareOrderExecutor::getOrderStatus(OrderId orderId) con
   return doGetOrderStatus(orderId);
 }
 
-Result<std::vector<Order>> ErrorAwareOrderExecutor::getActiveOrders() const
+Result<std::vector<Order>> OrderExecutor::getActiveOrders() const
 {
   std::shared_lock lock(_orderMutex);
   std::vector<Order> orders;
@@ -266,7 +266,7 @@ Result<std::vector<Order>> ErrorAwareOrderExecutor::getActiveOrders() const
   return orders;
 }
 
-VoidResult ErrorAwareOrderExecutor::validateOrder(const Order& order) const
+VoidResult OrderExecutor::validateOrder(const Order& order) const
 {
   // Validate quantity
   if (auto result = validateOrderQuantity(order); !result)
@@ -295,26 +295,26 @@ VoidResult ErrorAwareOrderExecutor::validateOrder(const Order& order) const
   return {};
 }
 
-Result<ExecutorHealthStatus> ErrorAwareOrderExecutor::getHealthStatus() const
+Result<ExecutorHealthStatus> OrderExecutor::getHealthStatus() const
 {
   std::shared_lock lock(_statsMutex);
   return _healthStatus;
 }
 
-ErrorAwareOrderExecutor::ExecutionStatistics ErrorAwareOrderExecutor::getStatistics() const
+OrderExecutor::ExecutionStatistics OrderExecutor::getStatistics() const
 {
   std::shared_lock lock(_statsMutex);
   return _stats;
 }
 
-void ErrorAwareOrderExecutor::resetStatistics()
+void OrderExecutor::resetStatistics()
 {
   std::unique_lock lock(_statsMutex);
   _stats = ExecutionStatistics{};
   _stats.startTime = std::chrono::steady_clock::now();
 }
 
-void ErrorAwareOrderExecutor::reportError(const FloxError& error)
+void OrderExecutor::reportError(const FloxError& error)
 {
   std::unique_lock lock(_statsMutex);
   _recentErrors.push_back(error);
@@ -327,13 +327,13 @@ void ErrorAwareOrderExecutor::reportError(const FloxError& error)
   }
 }
 
-void ErrorAwareOrderExecutor::updateLastActivity()
+void OrderExecutor::updateLastActivity()
 {
   std::unique_lock lock(_statsMutex);
   _healthStatus.lastActivity = std::chrono::steady_clock::now();
 }
 
-VoidResult ErrorAwareOrderExecutor::validateOrderQuantity(const Order& order) const
+VoidResult OrderExecutor::validateOrderQuantity(const Order& order) const
 {
   if (order.quantity.toDouble() <= 0.0)
   {
@@ -349,7 +349,7 @@ VoidResult ErrorAwareOrderExecutor::validateOrderQuantity(const Order& order) co
   return {};
 }
 
-VoidResult ErrorAwareOrderExecutor::validateOrderPrice(const Order& order) const
+VoidResult OrderExecutor::validateOrderPrice(const Order& order) const
 {
   if (order.type == OrderType::LIMIT && order.price.toDouble() <= 0.0)
   {
@@ -365,7 +365,7 @@ VoidResult ErrorAwareOrderExecutor::validateOrderPrice(const Order& order) const
   return {};
 }
 
-VoidResult ErrorAwareOrderExecutor::validateOrderSymbol(const Order& order) const
+VoidResult OrderExecutor::validateOrderSymbol(const Order& order) const
 {
   if (order.symbol == 0)
   {
@@ -375,7 +375,7 @@ VoidResult ErrorAwareOrderExecutor::validateOrderSymbol(const Order& order) cons
   return {};
 }
 
-VoidResult ErrorAwareOrderExecutor::validateOrderLimits(const Order& order) const
+VoidResult OrderExecutor::validateOrderLimits(const Order& order) const
 {
   // Check order value limits
   double orderValue = order.price.toDouble() * order.quantity.toDouble();
@@ -389,7 +389,7 @@ VoidResult ErrorAwareOrderExecutor::validateOrderLimits(const Order& order) cons
 }
 
 template <typename F>
-auto ErrorAwareOrderExecutor::executeWithRetry(const std::string& operation, F&& func) -> std::invoke_result_t<F>
+auto OrderExecutor::executeWithRetry(const std::string& operation, F&& func) -> std::invoke_result_t<F>
 {
   using ReturnType = std::invoke_result_t<F>;
 
@@ -422,7 +422,7 @@ auto ErrorAwareOrderExecutor::executeWithRetry(const std::string& operation, F&&
   }
 }
 
-void ErrorAwareOrderExecutor::recordLatency(const std::string& operation, std::chrono::nanoseconds latency)
+void OrderExecutor::recordLatency(const std::string& operation, std::chrono::nanoseconds latency)
 {
   std::unique_lock lock(_statsMutex);
   auto& stats = _latencyStats[operation];
@@ -440,9 +440,9 @@ void ErrorAwareOrderExecutor::recordLatency(const std::string& operation, std::c
   }
 }
 
-// MockErrorAwareOrderExecutor implementation
+// MockOrderExecutor implementation
 
-Result<OrderId> MockErrorAwareOrderExecutor::doSubmitOrder(const Order& order)
+Result<OrderId> MockOrderExecutor::doSubmitOrder(const Order& order)
 {
   if (auto result = simulateFailure<OrderId>("submit", [&]() -> OrderId
                                              { return _nextOrderId.fetch_add(1); });
@@ -456,7 +456,7 @@ Result<OrderId> MockErrorAwareOrderExecutor::doSubmitOrder(const Order& order)
   }
 }
 
-VoidResult MockErrorAwareOrderExecutor::doCancelOrder(OrderId orderId)
+VoidResult MockOrderExecutor::doCancelOrder(OrderId orderId)
 {
   return simulateFailure<void>("cancel", [&]()
                                {
@@ -464,7 +464,7 @@ VoidResult MockErrorAwareOrderExecutor::doCancelOrder(OrderId orderId)
                                });
 }
 
-Result<OrderId> MockErrorAwareOrderExecutor::doModifyOrder(OrderId orderId, Price newPrice, Quantity newQuantity)
+Result<OrderId> MockOrderExecutor::doModifyOrder(OrderId orderId, Price newPrice, Quantity newQuantity)
 {
   if (auto result = simulateFailure<OrderId>("modify", [&]() -> OrderId
                                              {
@@ -480,7 +480,7 @@ Result<OrderId> MockErrorAwareOrderExecutor::doModifyOrder(OrderId orderId, Pric
   }
 }
 
-Result<OrderStatus> MockErrorAwareOrderExecutor::doGetOrderStatus(OrderId orderId) const
+Result<OrderStatus> MockOrderExecutor::doGetOrderStatus(OrderId orderId) const
 {
   // Mock status - randomly return different statuses
   std::uniform_int_distribution<int> dist(0, 3);
@@ -502,7 +502,7 @@ Result<OrderStatus> MockErrorAwareOrderExecutor::doGetOrderStatus(OrderId orderI
 }
 
 template <typename T>
-Result<T> MockErrorAwareOrderExecutor::simulateFailure(const std::string& operation, std::function<T()> successFunc) const
+Result<T> MockOrderExecutor::simulateFailure(const std::string& operation, std::function<T()> successFunc) const
 {
   auto it = _failureModes.find(operation);
   if (it != _failureModes.end())

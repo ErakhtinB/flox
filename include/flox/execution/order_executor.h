@@ -1,5 +1,5 @@
 /*
- * Flox Engine - Error-Aware Order Executor
+ * Flox Engine - Order Executor
  * Developed by Evgenii Makarov (https://github.com/eeiaao)
  *
  * Copyright (c) 2025 Evgenii Makarov
@@ -10,7 +10,6 @@
 #pragma once
 
 #include "flox/common.h"
-#include "flox/execution/abstract_executor.h"
 #include "flox/execution/order.h"
 #include "flox/util/error/error_system.h"
 
@@ -18,19 +17,17 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <memory>
 #include <optional>
 #include <random>
 #include <shared_mutex>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
 namespace flox
 {
 
-// OrderStatus is already defined in order.h
-
-// Executor health status
+// Execution health status
 struct ExecutorHealthStatus
 {
   bool isHealthy = true;
@@ -45,25 +42,17 @@ struct ExecutorHealthStatus
   std::chrono::milliseconds averageLatency{0};
 };
 
-// Error-aware order execution interface
-class IErrorAwareOrderExecutor
+// Order executor interface with integrated error handling
+class IOrderExecutor
 {
  public:
-  virtual ~IErrorAwareOrderExecutor() = default;
+  virtual ~IOrderExecutor() = default;
 
-  // Submit order with comprehensive error reporting
+  // Core order operations with comprehensive error reporting
   virtual Result<OrderId> submitOrder(const Order& order) = 0;
-
-  // Cancel order with error handling
   virtual VoidResult cancelOrder(OrderId orderId) = 0;
-
-  // Modify existing order
   virtual Result<OrderId> modifyOrder(OrderId orderId, Price newPrice, Quantity newQuantity) = 0;
-
-  // Query order status
   virtual Result<OrderStatus> getOrderStatus(OrderId orderId) const = 0;
-
-  // Get all active orders
   virtual Result<std::vector<Order>> getActiveOrders() const = 0;
 
   // Validate order before submission
@@ -73,8 +62,8 @@ class IErrorAwareOrderExecutor
   virtual Result<ExecutorHealthStatus> getHealthStatus() const = 0;
 };
 
-// Enhanced order executor implementation
-class ErrorAwareOrderExecutor : public IErrorAwareOrderExecutor
+// Enhanced order executor implementation with error handling, retry logic, and health monitoring
+class OrderExecutor : public IOrderExecutor
 {
  public:
   struct Config
@@ -91,11 +80,9 @@ class ErrorAwareOrderExecutor : public IErrorAwareOrderExecutor
     Config() = default;
   };
 
-  explicit ErrorAwareOrderExecutor(const Config& config);
-  ErrorAwareOrderExecutor() : ErrorAwareOrderExecutor(Config{}) {}
-  ~ErrorAwareOrderExecutor() override = default;
+  explicit OrderExecutor(const Config& config);
 
-  // IErrorAwareOrderExecutor implementation
+  // IOrderExecutor implementation
   Result<OrderId> submitOrder(const Order& order) override;
   VoidResult cancelOrder(OrderId orderId) override;
   Result<OrderId> modifyOrder(OrderId orderId, Price newPrice, Quantity newQuantity) override;
@@ -104,7 +91,7 @@ class ErrorAwareOrderExecutor : public IErrorAwareOrderExecutor
   VoidResult validateOrder(const Order& order) const override;
   Result<ExecutorHealthStatus> getHealthStatus() const override;
 
-  // Configuration and control
+  // Configuration management
   void setConfig(const Config& config) { _config = config; }
   const Config& getConfig() const { return _config; }
 
@@ -177,16 +164,16 @@ class ErrorAwareOrderExecutor : public IErrorAwareOrderExecutor
   std::atomic<OrderId> _nextOrderId{1};
 };
 
-// Concrete implementation for demo/testing
-class MockErrorAwareOrderExecutor : public ErrorAwareOrderExecutor
+// Mock implementation for testing and demos
+class MockOrderExecutor : public OrderExecutor
 {
  public:
-  explicit MockErrorAwareOrderExecutor(const Config& config)
-      : ErrorAwareOrderExecutor(config)
+  explicit MockOrderExecutor(const Config& config)
+      : OrderExecutor(config)
   {
   }
 
-  MockErrorAwareOrderExecutor() : MockErrorAwareOrderExecutor(Config{}) {}
+  MockOrderExecutor() : MockOrderExecutor(Config{}) {}
 
   // Simulate different failure scenarios for testing
   void setFailureMode(const std::string& operation, double failureRate, FloxError error)
@@ -225,7 +212,7 @@ class MockErrorAwareOrderExecutor : public ErrorAwareOrderExecutor
 class OrderLifecycleGuard
 {
  public:
-  OrderLifecycleGuard(IErrorAwareOrderExecutor& executor, const Order& order)
+  OrderLifecycleGuard(IOrderExecutor& executor, const Order& order)
       : _executor(executor), _order(order)
   {
     auto result = _executor.submitOrder(_order);
@@ -269,7 +256,7 @@ class OrderLifecycleGuard
   }
 
  private:
-  IErrorAwareOrderExecutor& _executor;
+  IOrderExecutor& _executor;
   Order _order;
   std::optional<OrderId> _orderId;
   bool _submitted = false;

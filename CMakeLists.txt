@@ -31,12 +31,6 @@ file(GLOB_RECURSE SRC_FILES
     src/**/*.cpp
 )
 
-# Add error handling system files
-list(APPEND SRC_FILES
-    src/engine/error_aware_engine.cpp
-    src/execution/error_aware_executor.cpp
-)
-
 set(FLOX ${PROJECT_NAME})
 set(FLOX_SYNC ${PROJECT_NAME}_sync)
 
