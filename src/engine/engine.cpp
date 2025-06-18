@@ -234,29 +234,34 @@ VoidResult Engine::validateEngineState() const
 
 VoidResult Engine::startSubsystems()
 {
+  ErrorCollector errorCollector;
+
   for (size_t i = 0; i < _subsystems.size(); ++i)
   {
     try
     {
-      _subsystems[i]->start();
+      _subsystems[i]->start();  // start() returns void
     }
     catch (const std::exception& e)
     {
+      errorCollector.add(expandError(ErrorCode::SUBSYSTEM_INIT_FAILED,
+                                     std::format("Exception starting subsystem {}: {}", i, e.what())));
+
       // Cleanup already started subsystems
       for (size_t j = 0; j < i; ++j)
       {
         try
         {
-          _subsystems[j]->stop();
+          _subsystems[j]->stop();  // stop() returns void
         }
-        catch (...)
+        catch (const std::exception& e)
         {
-          // Log but don't throw in cleanup
+          reportError(expandError(ErrorCode::ENGINE_SHUTDOWN_FAILED,
+                                  std::format("Exception during subsystem cleanup: {}", e.what())));
         }
       }
 
-      return std::unexpected(FLOX_ERROR(SUBSYSTEM_INIT_FAILED,
-                                        std::format("Failed to start subsystem {}: {}", i, e.what())));
+      return errorCollector.finalize();
     }
   }
 
@@ -265,29 +270,34 @@ VoidResult Engine::startSubsystems()
 
 VoidResult Engine::startConnectors()
 {
+  ErrorCollector errorCollector;
+
   for (size_t i = 0; i < _connectors.size(); ++i)
   {
     try
     {
-      _connectors[i]->start();
+      _connectors[i]->start();  // start() returns void
     }
     catch (const std::exception& e)
     {
+      errorCollector.add(expandError(ErrorCode::CONNECTION_AUTH_FAILED,
+                                     std::format("Exception starting connector {}: {}", i, e.what())));
+
       // Cleanup already started connectors
       for (size_t j = 0; j < i; ++j)
       {
         try
         {
-          _connectors[j]->stop();
+          _connectors[j]->stop();  // stop() returns void
         }
-        catch (...)
+        catch (const std::exception& e)
         {
-          // Log but don't throw in cleanup
+          reportError(expandError(ErrorCode::ENGINE_SHUTDOWN_FAILED,
+                                  std::format("Exception during connector cleanup: {}", e.what())));
         }
       }
 
-      return std::unexpected(FLOX_ERROR(CONNECTION_AUTH_FAILED,
-                                        std::format("Failed to start connector {}: {}", i, e.what())));
+      return errorCollector.finalize();
     }
   }
 
@@ -296,49 +306,65 @@ VoidResult Engine::startConnectors()
 
 VoidResult Engine::stopSubsystems()
 {
-  VoidResult result;
+  ErrorCollector errorCollector;
 
   // Stop in reverse order
   for (auto it = _subsystems.rbegin(); it != _subsystems.rend(); ++it)
   {
     try
     {
-      (*it)->stop();
+      (*it)->stop();  // stop() returns void
     }
     catch (const std::exception& e)
     {
-      if (result)
-      {  // Only capture first error
-        result = std::unexpected(FLOX_ERROR(ENGINE_SHUTDOWN_FAILED,
-                                            std::format("Failed to stop subsystem: {}", e.what())));
-      }
+      errorCollector.add(expandError(ErrorCode::ENGINE_SHUTDOWN_FAILED,
+                                     std::format("Exception stopping subsystem: {}", e.what())));
     }
   }
 
-  return result;
+  // Return aggregated errors, but don't fail completely on shutdown errors
+  if (errorCollector.hasErrors())
+  {
+    auto finalResult = errorCollector.finalize();
+    if (!finalResult)
+    {
+      reportError(finalResult.error());
+      return finalResult;
+    }
+  }
+
+  return {};
 }
 
 VoidResult Engine::stopConnectors()
 {
-  VoidResult result;
+  ErrorCollector errorCollector;
 
   for (auto& connector : _connectors)
   {
     try
     {
-      connector->stop();
+      connector->stop();  // stop() returns void
     }
     catch (const std::exception& e)
     {
-      if (result)
-      {  // Only capture first error
-        result = std::unexpected(FLOX_ERROR(ENGINE_SHUTDOWN_FAILED,
-                                            std::format("Failed to stop connector: {}", e.what())));
-      }
+      errorCollector.add(expandError(ErrorCode::ENGINE_SHUTDOWN_FAILED,
+                                     std::format("Exception stopping connector: {}", e.what())));
     }
   }
 
-  return result;
+  // Return aggregated errors, but don't fail completely on shutdown errors
+  if (errorCollector.hasErrors())
+  {
+    auto finalResult = errorCollector.finalize();
+    if (!finalResult)
+    {
+      reportError(finalResult.error());
+      return finalResult;
+    }
+  }
+
+  return {};
 }
 
 void Engine::updateHealthStatus()

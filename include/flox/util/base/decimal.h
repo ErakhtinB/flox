@@ -11,6 +11,7 @@
 
 #include <cassert>
 #include <cstdint>
+#include <format>
 #include <ostream>
 
 namespace flox
@@ -57,6 +58,9 @@ class Decimal
 
   constexpr Decimal operator+(Decimal d) const { return Decimal(_raw + d._raw); }
   constexpr Decimal operator-(Decimal d) const { return Decimal(_raw - d._raw); }
+  constexpr Decimal operator-() const { return Decimal(-_raw); }  // Unary negation
+
+  constexpr Decimal abs() const { return Decimal(_raw < 0 ? -_raw : _raw); }
 
   constexpr Decimal& operator+=(const Decimal& other)
   {
@@ -83,3 +87,16 @@ std::ostream& operator<<(std::ostream& os, const Decimal<Tag, Scale_, TickSize_>
 }
 
 }  // namespace flox
+
+// std::formatter specialization for Decimal types
+template <typename Tag, int Scale_, int64_t TickSize_>
+struct std::formatter<flox::Decimal<Tag, Scale_, TickSize_>, char>
+{
+  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+
+  template <typename FormatContext>
+  auto format(const flox::Decimal<Tag, Scale_, TickSize_>& value, FormatContext& ctx) const
+  {
+    return std::format_to(ctx.out(), "{}", value.toDouble());
+  }
+};

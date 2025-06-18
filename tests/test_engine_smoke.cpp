@@ -12,6 +12,7 @@
 #include "flox/common.h"
 #include "flox/engine/abstract_engine_builder.h"
 #include "flox/engine/bus/market_data_bus.h"
+#include "flox/engine/engine.h"
 #include "flox/engine/market_data_event_pool.h"
 #include "flox/strategy/abstract_strategy.h"
 
@@ -129,13 +130,48 @@ class SmokeEngineBuilder : public IEngineBuilder
     {
     }
 
-    void start() override
+    VoidResult start() override
     {
       _bus.start();
+      _isRunning = true;
+      return VoidResult{};
     }
-    void stop() override
+
+    VoidResult stop() override
     {
       _bus.stop();
+      _isRunning = false;
+      return VoidResult{};
+    }
+
+    bool isRunning() const noexcept override
+    {
+      return _isRunning;
+    }
+
+    Result<EngineHealthStatus> getHealthStatus() const override
+    {
+      // Return a simple mock health status
+      EngineHealthStatus status;
+      return status;
+    }
+
+    VoidResult addSubsystem(std::unique_ptr<ISubsystem> subsystem) override
+    {
+      // Mock implementation - just accept any subsystem
+      return VoidResult{};
+    }
+
+    VoidResult addConnector(std::shared_ptr<ExchangeConnector> connector) override
+    {
+      // Mock implementation - just accept any connector
+      return VoidResult{};
+    }
+
+    Result<std::map<ErrorCategory, size_t>> getErrorStatistics() const override
+    {
+      // Return empty error statistics for mock
+      return std::map<ErrorCategory, size_t>{};
     }
 
     void runTrade(Price price, Quantity qty) { _connector.publishTrade(price, qty); }
@@ -147,6 +183,7 @@ class SmokeEngineBuilder : public IEngineBuilder
     MarketDataBus& _bus;
     MockConnector& _connector;
     std::shared_ptr<TestStrategy> _strategy;
+    bool _isRunning = false;
   };
 
   SymbolId _symbol;
