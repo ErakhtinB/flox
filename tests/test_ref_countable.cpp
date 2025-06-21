@@ -47,6 +47,8 @@ TEST(RefCountableTest, ResetSetsRefCount)
   EXPECT_EQ(obj.refCount(), 7u);
 }
 
+// Death tests only work in debug builds where assertions are enabled
+#ifndef NDEBUG
 TEST(RefCountableDeathTest, ReleaseOnZeroRefCountTriggersAssert)
 {
   TestRefCountable obj;
@@ -56,3 +58,10 @@ TEST(RefCountableDeathTest, ReleaseOnZeroRefCountTriggersAssert)
       },
       ".*release called on zero refcount.*");
 }
+#else
+// In release builds, assertions are disabled so we skip this test
+TEST(RefCountableTest, ReleaseOnZeroRefCountSkippedInRelease)
+{
+  GTEST_SKIP() << "Death test for assertions is only available in debug builds";
+}
+#endif
