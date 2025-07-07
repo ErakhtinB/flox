@@ -22,6 +22,7 @@
 #include "flox/engine/tick_barrier.h"
 #include "flox/util/concurrency/spsc_queue.h"
 #include "flox/util/eventing/event_bus_component.h"
+#include "flox/util/performance/cpu_affinity.h"
 
 namespace flox
 {
@@ -83,6 +84,17 @@ class EventBus
 
         e.thread = std::make_unique<std::thread>([this, queue, listener = std::move(listener)] mutable
                                                  {
+          // Apply CPU affinity if configured
+          if (_coreAssignment.has_value())
+          {
+            auto& assignment = _coreAssignment.value();
+            if (!assignment.marketDataCores.empty())
+            {
+              performance::CpuAffinity::pinToCore(assignment.marketDataCores[0]);
+              performance::CpuAffinity::setRealTimePriority(90); // High priority for market data
+            }
+          }
+
           {
             std::lock_guard<std::mutex> lk(_readyMutex);
             if (--_active == 0) _cv.notify_one();
@@ -186,6 +198,24 @@ class EventBus
     _drainOnStop = true;
   }
 
+  /**
+   * @brief Configure CPU affinity for event bus threads
+   * @param assignment Core assignment configuration
+   */
+  void setCoreAssignment(const performance::CpuAffinity::CoreAssignment& assignment)
+  {
+    _coreAssignment = assignment;
+  }
+
+  /**
+   * @brief Get current CPU affinity configuration
+   * @return Optional core assignment
+   */
+  std::optional<performance::CpuAffinity::CoreAssignment> getCoreAssignment() const
+  {
+    return _coreAssignment;
+  }
+
  private:
   struct Entry
   {
@@ -222,6 +252,7 @@ class EventBus
   std::mutex _readyMutex;
   std::atomic<uint64_t> _tickCounter{0};
   bool _drainOnStop = false;
+  std::optional<performance::CpuAffinity::CoreAssignment> _coreAssignment;
 };
 
 }  // namespace flox
