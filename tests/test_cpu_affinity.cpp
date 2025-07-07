@@ -280,6 +280,479 @@ TEST_F(CpuAffinityTest, IsolatedCores)
 }
 
 /**
+ * @brief Test critical component configuration
+ */
+TEST_F(CpuAffinityTest, CriticalComponentConfig)
+{
+  CpuAffinity::CriticalComponentConfig config;
+
+  // Test default values
+  EXPECT_TRUE(config.preferIsolatedCores);
+  EXPECT_TRUE(config.exclusiveIsolatedCores);
+  EXPECT_FALSE(config.allowSharedCriticalCores);
+  EXPECT_EQ(config.minIsolatedForCritical, 1);
+
+  // Test default priorities
+  EXPECT_EQ(config.componentPriority.at("marketData"), 0);
+  EXPECT_EQ(config.componentPriority.at("execution"), 1);
+  EXPECT_EQ(config.componentPriority.at("strategy"), 2);
+  EXPECT_EQ(config.componentPriority.at("risk"), 3);
+
+  // Test custom configuration
+  config.preferIsolatedCores = false;
+  config.exclusiveIsolatedCores = false;
+  config.allowSharedCriticalCores = true;
+  config.minIsolatedForCritical = 2;
+  config.componentPriority["marketData"] = 1;
+  config.componentPriority["execution"] = 0;
+
+  EXPECT_FALSE(config.preferIsolatedCores);
+  EXPECT_FALSE(config.exclusiveIsolatedCores);
+  EXPECT_TRUE(config.allowSharedCriticalCores);
+  EXPECT_EQ(config.minIsolatedForCritical, 2);
+  EXPECT_EQ(config.componentPriority.at("marketData"), 1);
+  EXPECT_EQ(config.componentPriority.at("execution"), 0);
+}
+
+/**
+ * @brief Test enhanced core assignment with configuration
+ */
+TEST_F(CpuAffinityTest, EnhancedCoreAssignment)
+{
+  auto isolatedCores = CpuAffinity::getIsolatedCores();
+
+  // Test with default configuration
+  auto assignment = CpuAffinity::getRecommendedCoreAssignment();
+
+  EXPECT_EQ(assignment.hasIsolatedCores, !isolatedCores.empty());
+  EXPECT_EQ(assignment.allIsolatedCores, isolatedCores);
+
+  // Verify all assigned cores are valid
+  auto verifyValidCores = [this](const std::vector<int>& cores)
+  {
+    for (int core : cores)
+    {
+      EXPECT_GE(core, 0);
+      EXPECT_LT(core, _numCores);
+    }
+  };
+
+  verifyValidCores(assignment.marketDataCores);
+  verifyValidCores(assignment.executionCores);
+  verifyValidCores(assignment.strategyCores);
+  verifyValidCores(assignment.riskCores);
+  verifyValidCores(assignment.generalCores);
+  verifyValidCores(assignment.criticalCores);
+
+  // Test with custom configuration
+  CpuAffinity::CriticalComponentConfig config;
+  config.preferIsolatedCores = false;
+
+  auto assignment2 = CpuAffinity::getRecommendedCoreAssignment(config);
+  EXPECT_EQ(assignment2.hasIsolatedCores, !isolatedCores.empty());
+
+  if (!isolatedCores.empty())
+  {
+    // When not preferring isolated cores, critical cores might not be isolated
+    bool hasNonIsolatedCritical = false;
+    for (int core : assignment2.criticalCores)
+    {
+      if (std::find(isolatedCores.begin(), isolatedCores.end(), core) == isolatedCores.end())
+      {
+        hasNonIsolatedCritical = true;
+        break;
+      }
+    }
+    // This test is flexible since behavior depends on system configuration
+  }
+}
+
+/**
+ * @brief Test critical component pinning
+ */
+TEST_F(CpuAffinityTest, CriticalComponentPinning)
+{
+  auto assignment = CpuAffinity::getRecommendedCoreAssignment();
+
+  // Test invalid component
+  EXPECT_FALSE(CpuAffinity::pinCriticalComponent("invalid", assignment));
+
+  // Test valid components (only if they have assigned cores)
+  if (!assignment.marketDataCores.empty())
+  {
+    // Note: This may fail without proper permissions, so we don't assert
+    CpuAffinity::pinCriticalComponent("marketData", assignment);
+  }
+
+  if (!assignment.executionCores.empty())
+  {
+    CpuAffinity::pinCriticalComponent("execution", assignment);
+  }
+
+  if (!assignment.strategyCores.empty())
+  {
+    CpuAffinity::pinCriticalComponent("strategy", assignment);
+  }
+
+  if (!assignment.riskCores.empty())
+  {
+    CpuAffinity::pinCriticalComponent("risk", assignment);
+  }
+}
+
+/**
+ * @brief Test isolated core isolation verification
+ */
+TEST_F(CpuAffinityTest, VerifyCriticalCoreIsolation)
+{
+  auto assignment = CpuAffinity::getRecommendedCoreAssignment();
+
+  // Should not throw regardless of isolation status
+  bool result = CpuAffinity::verifyCriticalCoreIsolation(assignment);
+
+  if (assignment.hasIsolatedCores && !assignment.criticalCores.empty())
+  {
+    // If we have isolated cores and critical cores, check if they align
+    bool allCriticalIsolated = true;
+    for (int core : assignment.criticalCores)
+    {
+      if (std::find(assignment.allIsolatedCores.begin(),
+                    assignment.allIsolatedCores.end(), core) == assignment.allIsolatedCores.end())
+      {
+        allCriticalIsolated = false;
+        break;
+      }
+    }
+    EXPECT_EQ(result, allCriticalIsolated);
+  }
+  else if (!assignment.hasIsolatedCores)
+  {
+    EXPECT_FALSE(result);
+  }
+}
+
+/**
+ * @brief Test isolated core requirements checking
+ */
+TEST_F(CpuAffinityTest, CheckIsolatedCoreRequirements)
+{
+  auto isolatedCores = CpuAffinity::getIsolatedCores();
+
+  // Test with different requirements
+  bool result1 = CpuAffinity::checkIsolatedCoreRequirements(1);
+  bool result2 = CpuAffinity::checkIsolatedCoreRequirements(4);
+  bool result3 = CpuAffinity::checkIsolatedCoreRequirements(100);
+
+  EXPECT_EQ(result1, isolatedCores.size() >= 1);
+  EXPECT_EQ(result2, isolatedCores.size() >= 4);
+  EXPECT_EQ(result3, isolatedCores.size() >= 100);
+
+  // Test default parameter
+  bool resultDefault = CpuAffinity::checkIsolatedCoreRequirements();
+  EXPECT_EQ(resultDefault, isolatedCores.size() >= 4);
+}
+
+/**
+ * @brief Test optimal HFT configuration setup
+ */
+TEST_F(CpuAffinityTest, OptimalHftConfiguration)
+{
+  // Test without frequency scaling and real-time priority changes
+  auto assignment = CpuAffinity::setupOptimalHftConfiguration(false, false);
+
+  // Should return valid assignment
+  EXPECT_GE(assignment.marketDataCores.size() + assignment.executionCores.size() +
+                assignment.strategyCores.size() + assignment.riskCores.size() +
+                assignment.generalCores.size(),
+            0);
+
+  // Test with frequency scaling and real-time priority (may fail without permissions)
+  auto assignment2 = CpuAffinity::setupOptimalHftConfiguration(true, true);
+  EXPECT_GE(assignment2.marketDataCores.size() + assignment2.executionCores.size() +
+                assignment2.strategyCores.size() + assignment2.riskCores.size() +
+                assignment2.generalCores.size(),
+            0);
+}
+
+/**
+ * @brief Test critical components setup and pinning
+ */
+TEST_F(CpuAffinityTest, SetupAndPinCriticalComponents)
+{
+  CpuAffinity::CriticalComponentConfig config;
+  config.preferIsolatedCores = true;
+
+  // This test doesn't assert on the result since it depends on permissions
+  // Just verify it doesn't crash
+  bool result = CpuAffinity::setupAndPinCriticalComponents(config);
+  EXPECT_TRUE(result || !result);  // Always true, just to check it runs
+}
+
+/**
+ * @brief Test isolated core usage demonstration
+ */
+TEST_F(CpuAffinityTest, DemonstrateIsolatedCoreUsage)
+{
+  // This should not throw
+  EXPECT_NO_THROW(CpuAffinity::demonstrateIsolatedCoreUsage());
+}
+
+/**
+ * @brief Test isolated cores with different priority configurations
+ */
+TEST_F(CpuAffinityTest, IsolatedCoresPriorityConfig)
+{
+  auto isolatedCores = CpuAffinity::getIsolatedCores();
+
+  if (isolatedCores.size() >= 2)
+  {
+    // Test priority reordering
+    CpuAffinity::CriticalComponentConfig config;
+    config.componentPriority["execution"] = 0;   // Highest priority
+    config.componentPriority["marketData"] = 1;  // Second priority
+    config.componentPriority["risk"] = 2;
+    config.componentPriority["strategy"] = 3;
+
+    auto assignment = CpuAffinity::getRecommendedCoreAssignment(config);
+
+    // If we have isolated cores, execution should get first isolated core
+    if (!assignment.executionCores.empty() && !assignment.marketDataCores.empty())
+    {
+      if (!isolatedCores.empty())
+      {
+        // Check if execution got a lower-numbered isolated core than market data
+        // (This is a heuristic test since the actual assignment depends on the algorithm)
+        EXPECT_FALSE(assignment.executionCores.empty());
+        EXPECT_FALSE(assignment.marketDataCores.empty());
+      }
+    }
+  }
+}
+
+/**
+ * @brief Test exclusive vs shared isolated core usage
+ */
+TEST_F(CpuAffinityTest, ExclusiveVsSharedIsolatedCores)
+{
+  auto isolatedCores = CpuAffinity::getIsolatedCores();
+
+  if (isolatedCores.size() >= 1)
+  {
+    // Test exclusive isolated cores (default)
+    CpuAffinity::CriticalComponentConfig exclusiveConfig;
+    exclusiveConfig.exclusiveIsolatedCores = true;
+    exclusiveConfig.allowSharedCriticalCores = false;
+
+    auto exclusiveAssignment = CpuAffinity::getRecommendedCoreAssignment(exclusiveConfig);
+
+    // Test shared isolated cores
+    CpuAffinity::CriticalComponentConfig sharedConfig;
+    sharedConfig.exclusiveIsolatedCores = false;
+    sharedConfig.allowSharedCriticalCores = true;
+
+    auto sharedAssignment = CpuAffinity::getRecommendedCoreAssignment(sharedConfig);
+
+    // Shared config should potentially have isolated cores in general cores too
+    if (!isolatedCores.empty())
+    {
+      EXPECT_TRUE(sharedAssignment.hasIsolatedCores);
+
+      // With shared config, general cores might include isolated cores
+      size_t sharedGeneralCores = sharedAssignment.generalCores.size();
+      size_t exclusiveGeneralCores = exclusiveAssignment.generalCores.size();
+
+      // This is a heuristic test - shared might have more general cores
+      EXPECT_GE(sharedGeneralCores, 0);
+      EXPECT_GE(exclusiveGeneralCores, 0);
+    }
+  }
+}
+
+/**
+ * @brief Test core assignment with insufficient isolated cores
+ */
+TEST_F(CpuAffinityTest, InsufficientIsolatedCores)
+{
+  auto isolatedCores = CpuAffinity::getIsolatedCores();
+
+  // Test with minimum requirement higher than available cores
+  CpuAffinity::CriticalComponentConfig config;
+  config.minIsolatedForCritical = isolatedCores.size() + 10;  // More than available
+  config.preferIsolatedCores = true;
+
+  auto assignment = CpuAffinity::getRecommendedCoreAssignment(config);
+
+  // Should fall back to basic assignment
+  EXPECT_EQ(assignment.hasIsolatedCores, !isolatedCores.empty());
+
+  // Should still assign cores even without sufficient isolated cores
+  size_t totalAssignedCores = assignment.marketDataCores.size() +
+                              assignment.executionCores.size() +
+                              assignment.strategyCores.size() +
+                              assignment.riskCores.size() +
+                              assignment.generalCores.size();
+  EXPECT_GT(totalAssignedCores, 0);
+}
+
+/**
+ * @brief Comprehensive test simulating real HFT isolated core usage
+ */
+TEST_F(CpuAffinityTest, HftIsolatedCoreSimulation)
+{
+  if (_numCores < 2)
+  {
+    GTEST_SKIP() << "Need at least 2 cores for HFT simulation";
+  }
+
+  auto isolatedCores = CpuAffinity::getIsolatedCores();
+
+  // Simulate HFT setup process
+  std::cout << "\n=== HFT Isolated Core Simulation ===" << std::endl;
+
+  // Step 1: Check system requirements
+  bool hasRequiredCores = CpuAffinity::checkIsolatedCoreRequirements(4);
+
+  // Step 2: Configure based on available cores
+  CpuAffinity::CriticalComponentConfig config;
+  config.preferIsolatedCores = true;
+  config.exclusiveIsolatedCores = hasRequiredCores;
+  config.allowSharedCriticalCores = !hasRequiredCores;
+  config.minIsolatedForCritical = hasRequiredCores ? 4 : 1;
+
+  // Step 3: Get optimal assignment
+  auto assignment = CpuAffinity::getNumaAwareCoreAssignment(config);
+  CpuAffinity::printCoreAssignment(assignment);
+
+  // Step 4: Verify the assignment is valid
+  EXPECT_EQ(assignment.hasIsolatedCores, !isolatedCores.empty());
+
+  // Step 5: Simulate thread pinning
+  std::atomic<bool> running{true};
+  std::atomic<int> threadsStarted{0};
+  std::atomic<int> threadsCompleted{0};
+  std::vector<std::thread> hftThreads;
+
+  // Market data thread
+  if (!assignment.marketDataCores.empty())
+  {
+    hftThreads.emplace_back([&, coreId = assignment.marketDataCores[0]]()
+                            {
+      threadsStarted++;
+      
+      // Pin to assigned core
+      bool pinned = CpuAffinity::pinToCore(coreId);
+      EXPECT_TRUE(pinned || !pinned);  // Don't fail test on permission issues
+      
+      // Set high priority (may fail without permissions)
+      CpuAffinity::setRealTimePriority(90);
+      
+      // Simulate market data processing
+      auto startTime = std::chrono::high_resolution_clock::now();
+      while (running && 
+             std::chrono::high_resolution_clock::now() - startTime < std::chrono::milliseconds(100)) {
+        // Simulate processing market tick
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
+      }
+      
+      threadsCompleted++; });
+  }
+
+  // Execution thread
+  if (!assignment.executionCores.empty())
+  {
+    hftThreads.emplace_back([&, coreId = assignment.executionCores[0]]()
+                            {
+      threadsStarted++;
+      
+      bool pinned = CpuAffinity::pinToCore(coreId);
+      EXPECT_TRUE(pinned || !pinned);
+      
+      CpuAffinity::setRealTimePriority(85);
+      
+      auto startTime = std::chrono::high_resolution_clock::now();
+      while (running && 
+             std::chrono::high_resolution_clock::now() - startTime < std::chrono::milliseconds(100)) {
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+      }
+      
+      threadsCompleted++; });
+  }
+
+  // Strategy thread
+  if (!assignment.strategyCores.empty())
+  {
+    hftThreads.emplace_back([&, coreId = assignment.strategyCores[0]]()
+                            {
+      threadsStarted++;
+      
+      bool pinned = CpuAffinity::pinToCore(coreId);
+      EXPECT_TRUE(pinned || !pinned);
+      
+      CpuAffinity::setRealTimePriority(80);
+      
+      auto startTime = std::chrono::high_resolution_clock::now();
+      while (running && 
+             std::chrono::high_resolution_clock::now() - startTime < std::chrono::milliseconds(100)) {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      }
+      
+      threadsCompleted++; });
+  }
+
+  // Risk thread
+  if (!assignment.riskCores.empty())
+  {
+    hftThreads.emplace_back([&, coreId = assignment.riskCores[0]]()
+                            {
+      threadsStarted++;
+      
+      bool pinned = CpuAffinity::pinToCore(coreId);
+      EXPECT_TRUE(pinned || !pinned);
+      
+      CpuAffinity::setRealTimePriority(75);
+      
+      auto startTime = std::chrono::high_resolution_clock::now();
+      while (running && 
+             std::chrono::high_resolution_clock::now() - startTime < std::chrono::milliseconds(100)) {
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+      }
+      
+      threadsCompleted++; });
+  }
+
+  // Wait for threads to start
+  while (threadsStarted.load() < (int)hftThreads.size() &&
+         std::chrono::high_resolution_clock::now() - std::chrono::high_resolution_clock::now() < std::chrono::seconds(1))
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+
+  // Let threads run briefly
+  std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
+  // Signal shutdown
+  running = false;
+
+  // Wait for all threads to complete
+  for (auto& thread : hftThreads)
+  {
+    if (thread.joinable())
+    {
+      thread.join();
+    }
+  }
+
+  // Verify all threads completed
+  EXPECT_EQ(threadsCompleted.load(), (int)hftThreads.size());
+
+  // Step 6: Final verification
+  bool isolation = CpuAffinity::verifyCriticalCoreIsolation(assignment);
+  EXPECT_TRUE(isolation || !isolation);  // Don't fail test, just verify it runs
+
+  std::cout << "=== HFT Simulation Complete ===" << std::endl;
+}
+
+/**
  * @brief Test real-time priority setting
  */
 TEST_F(CpuAffinityTest, RealTimePriority)

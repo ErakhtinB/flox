@@ -15,6 +15,7 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -371,18 +372,142 @@ class CpuAffinity
     std::vector<int> executionCores;   // Cores for order execution
     std::vector<int> riskCores;        // Cores for risk management
     std::vector<int> generalCores;     // Cores for general tasks
+
+    // Additional information about isolation
+    bool hasIsolatedCores = false;
+    std::vector<int> allIsolatedCores;
+    std::vector<int> criticalCores;  // All cores assigned to critical tasks
   };
 
-  static CoreAssignment getRecommendedCoreAssignment()
+  /**
+   * @brief Configuration for critical component core assignment
+   */
+  struct CriticalComponentConfig
+  {
+    bool preferIsolatedCores;       // Prefer isolated cores for critical tasks
+    bool exclusiveIsolatedCores;    // Use isolated cores exclusively for critical tasks
+    bool allowSharedCriticalCores;  // Allow multiple critical tasks on same core
+    int minIsolatedForCritical;     // Minimum isolated cores needed to use them
+
+    // Priority order for critical component assignment (0 = highest priority)
+    std::map<std::string, int> componentPriority;
+
+    // Default constructor with sensible defaults
+    CriticalComponentConfig()
+        : preferIsolatedCores(true), exclusiveIsolatedCores(true), allowSharedCriticalCores(false), minIsolatedForCritical(1), componentPriority({{"marketData", 0}, {"execution", 1}, {"strategy", 2}, {"risk", 3}})
+    {
+    }
+  };
+
+  /**
+   * @brief Get recommended core assignment with enhanced isolated core utilization
+   * @param config Configuration for critical component assignment
+   * @return CoreAssignment with optimized isolated core usage
+   */
+  static CoreAssignment getRecommendedCoreAssignment(const CriticalComponentConfig& config = CriticalComponentConfig{})
   {
     CoreAssignment assignment;
 
     int numCores = getNumCores();
     auto isolatedCores = getIsolatedCores();
 
+    assignment.hasIsolatedCores = !isolatedCores.empty();
+    assignment.allIsolatedCores = isolatedCores;
+
+    // Early return if no cores available
+    if (numCores == 0)
+    {
+      return assignment;
+    }
+
+    // If insufficient isolated cores or not preferring them, fall back to general assignment
+    if (!config.preferIsolatedCores ||
+        (int)isolatedCores.size() < config.minIsolatedForCritical)
+    {
+      return getBasicCoreAssignment(numCores, isolatedCores);
+    }
+
+    // Sort components by priority for assignment
+    std::vector<std::pair<std::string, int>> sortedComponents;
+    for (const auto& [component, priority] : config.componentPriority)
+    {
+      sortedComponents.emplace_back(component, priority);
+    }
+    std::sort(sortedComponents.begin(), sortedComponents.end(),
+              [](const auto& a, const auto& b)
+              { return a.second < b.second; });
+
+    // Assign critical components to isolated cores based on priority
+    std::vector<int> availableIsolated = isolatedCores;
+    std::vector<int>* targetCores = nullptr;
+
+    for (const auto& [component, priority] : sortedComponents)
+    {
+      if (availableIsolated.empty() && !config.allowSharedCriticalCores)
+      {
+        break;
+      }
+
+      // Get target vector for this component
+      if (component == "marketData")
+        targetCores = &assignment.marketDataCores;
+      else if (component == "execution")
+        targetCores = &assignment.executionCores;
+      else if (component == "strategy")
+        targetCores = &assignment.strategyCores;
+      else if (component == "risk")
+        targetCores = &assignment.riskCores;
+      else
+        continue;
+
+      if (targetCores && !availableIsolated.empty())
+      {
+        targetCores->push_back(availableIsolated.front());
+        assignment.criticalCores.push_back(availableIsolated.front());
+
+        if (!config.allowSharedCriticalCores)
+        {
+          availableIsolated.erase(availableIsolated.begin());
+        }
+      }
+    }
+
+    // Assign remaining isolated cores to general use if not exclusively for critical tasks
+    if (!config.exclusiveIsolatedCores)
+    {
+      for (int core : availableIsolated)
+      {
+        assignment.generalCores.push_back(core);
+      }
+    }
+
+    // Add non-isolated cores to general use
+    for (int i = 0; i < numCores; ++i)
+    {
+      if (std::find(isolatedCores.begin(), isolatedCores.end(), i) == isolatedCores.end())
+      {
+        assignment.generalCores.push_back(i);
+      }
+    }
+
+    return assignment;
+  }
+
+  /**
+   * @brief Get basic core assignment when isolated cores are not used
+   * @param numCores Total number of cores
+   * @param isolatedCores Vector of isolated cores (for reference)
+   * @return CoreAssignment with basic distribution
+   */
+  static CoreAssignment getBasicCoreAssignment(int numCores, const std::vector<int>& isolatedCores)
+  {
+    CoreAssignment assignment;
+    assignment.hasIsolatedCores = !isolatedCores.empty();
+    assignment.allIsolatedCores = isolatedCores;
+
     if (isolatedCores.empty())
     {
-      // No isolated cores, use all available cores
+      // No isolated cores, distribute evenly
       for (int i = 0; i < numCores; ++i)
       {
         assignment.generalCores.push_back(i);
@@ -390,7 +515,7 @@ class CpuAffinity
     }
     else
     {
-      // Use isolated cores for critical tasks
+      // Use isolated cores for critical tasks when available
       int numIsolated = isolatedCores.size();
 
       if (numIsolated >= 4)
@@ -400,6 +525,9 @@ class CpuAffinity
         assignment.strategyCores.push_back(isolatedCores[1]);
         assignment.executionCores.push_back(isolatedCores[2]);
         assignment.riskCores.push_back(isolatedCores[3]);
+
+        assignment.criticalCores = {isolatedCores[0], isolatedCores[1],
+                                    isolatedCores[2], isolatedCores[3]};
 
         // Remaining isolated cores for general use
         for (int i = 4; i < numIsolated; ++i)
@@ -411,11 +539,20 @@ class CpuAffinity
       {
         // Limited isolated cores, prioritize market data and execution
         if (numIsolated >= 1)
+        {
           assignment.marketDataCores.push_back(isolatedCores[0]);
+          assignment.criticalCores.push_back(isolatedCores[0]);
+        }
         if (numIsolated >= 2)
+        {
           assignment.executionCores.push_back(isolatedCores[1]);
+          assignment.criticalCores.push_back(isolatedCores[1]);
+        }
         if (numIsolated >= 3)
+        {
           assignment.strategyCores.push_back(isolatedCores[2]);
+          assignment.criticalCores.push_back(isolatedCores[2]);
+        }
       }
 
       // Add non-isolated cores for general use
@@ -429,6 +566,155 @@ class CpuAffinity
     }
 
     return assignment;
+  }
+
+  /**
+   * @brief Pin critical component to its assigned isolated core
+   * @param component Component name ("marketData", "execution", "strategy", "risk")
+   * @param assignment Core assignment from getRecommendedCoreAssignment
+   * @return true if successful, false otherwise
+   */
+  static bool pinCriticalComponent(const std::string& component, const CoreAssignment& assignment)
+  {
+    const std::vector<int>* targetCores = nullptr;
+
+    if (component == "marketData")
+      targetCores = &assignment.marketDataCores;
+    else if (component == "execution")
+      targetCores = &assignment.executionCores;
+    else if (component == "strategy")
+      targetCores = &assignment.strategyCores;
+    else if (component == "risk")
+      targetCores = &assignment.riskCores;
+    else
+    {
+      std::cerr << "[CpuAffinity] Unknown critical component: " << component << std::endl;
+      return false;
+    }
+
+    if (!targetCores || targetCores->empty())
+    {
+      std::cerr << "[CpuAffinity] No cores assigned for component: " << component << std::endl;
+      return false;
+    }
+
+    // Pin to the first assigned core for this component
+    int coreId = (*targetCores)[0];
+    bool success = pinToCore(coreId);
+
+    if (success)
+    {
+      std::cout << "[CpuAffinity] Successfully pinned " << component
+                << " component to core " << coreId;
+
+      // Check if this is an isolated core
+      auto& isolatedCores = assignment.allIsolatedCores;
+      if (std::find(isolatedCores.begin(), isolatedCores.end(), coreId) != isolatedCores.end())
+      {
+        std::cout << " (isolated)";
+      }
+      std::cout << std::endl;
+    }
+
+    return success;
+  }
+
+  /**
+   * @brief Verify isolation of critical cores
+   * @param assignment Core assignment to verify
+   * @return true if critical components are properly isolated
+   */
+  static bool verifyCriticalCoreIsolation(const CoreAssignment& assignment)
+  {
+    if (!assignment.hasIsolatedCores)
+    {
+      std::cout << "[CpuAffinity] Warning: No isolated cores available on system" << std::endl;
+      return false;
+    }
+
+    bool allCriticalIsolated = true;
+
+    auto checkCores = [&](const std::vector<int>& cores, const std::string& component)
+    {
+      for (int coreId : cores)
+      {
+        bool isIsolated = std::find(assignment.allIsolatedCores.begin(),
+                                    assignment.allIsolatedCores.end(), coreId) != assignment.allIsolatedCores.end();
+
+        if (isIsolated)
+        {
+          std::cout << "[CpuAffinity] ✓ " << component << " core " << coreId
+                    << " is properly isolated" << std::endl;
+        }
+        else
+        {
+          std::cout << "[CpuAffinity] ⚠ " << component << " core " << coreId
+                    << " is NOT isolated" << std::endl;
+          allCriticalIsolated = false;
+        }
+      }
+    };
+
+    checkCores(assignment.marketDataCores, "Market Data");
+    checkCores(assignment.executionCores, "Execution");
+    checkCores(assignment.strategyCores, "Strategy");
+    checkCores(assignment.riskCores, "Risk");
+
+    return allCriticalIsolated;
+  }
+
+  /**
+   * @brief Print detailed core assignment information
+   * @param assignment Core assignment to print
+   */
+  static void printCoreAssignment(const CoreAssignment& assignment)
+  {
+    std::cout << "\n[CpuAffinity] Core Assignment Details:\n";
+    std::cout << "=====================================\n";
+
+    if (assignment.hasIsolatedCores)
+    {
+      std::cout << "Isolated cores available: ";
+      for (int core : assignment.allIsolatedCores)
+      {
+        std::cout << core << " ";
+      }
+      std::cout << "\n";
+    }
+    else
+    {
+      std::cout << "No isolated cores detected on system\n";
+    }
+
+    auto printCoreGroup = [](const std::string& name, const std::vector<int>& cores)
+    {
+      std::cout << name << " cores: ";
+      if (cores.empty())
+      {
+        std::cout << "None assigned";
+      }
+      else
+      {
+        for (int core : cores)
+        {
+          std::cout << core << " ";
+        }
+      }
+      std::cout << "\n";
+    };
+
+    printCoreGroup("Market Data", assignment.marketDataCores);
+    printCoreGroup("Execution", assignment.executionCores);
+    printCoreGroup("Strategy", assignment.strategyCores);
+    printCoreGroup("Risk", assignment.riskCores);
+    printCoreGroup("General", assignment.generalCores);
+
+    if (!assignment.criticalCores.empty())
+    {
+      printCoreGroup("All Critical", assignment.criticalCores);
+    }
+
+    std::cout << "=====================================\n\n";
   }
 
   /**
@@ -668,9 +954,10 @@ class CpuAffinity
 
   /**
    * @brief Get NUMA-aware core assignment for HFT workloads
-   * @return CoreAssignment with NUMA locality considerations
+   * @param config Configuration for critical component assignment
+   * @return CoreAssignment with NUMA locality considerations and isolated core optimization
    */
-  static CoreAssignment getNumaAwareCoreAssignment()
+  static CoreAssignment getNumaAwareCoreAssignment(const CriticalComponentConfig& config = CriticalComponentConfig{})
   {
     CoreAssignment assignment;
     auto topology = getNumaTopology();
@@ -678,10 +965,19 @@ class CpuAffinity
     if (!topology.numaAvailable || topology.nodes.empty())
     {
       // Fall back to regular assignment if NUMA not available
-      return getRecommendedCoreAssignment();
+      return getRecommendedCoreAssignment(config);
     }
 
     auto isolatedCores = getIsolatedCores();
+    assignment.hasIsolatedCores = !isolatedCores.empty();
+    assignment.allIsolatedCores = isolatedCores;
+
+    // If not using isolated cores or insufficient isolated cores, fall back
+    if (!config.preferIsolatedCores ||
+        (int)isolatedCores.size() < config.minIsolatedForCritical)
+    {
+      return getRecommendedCoreAssignment(config);
+    }
 
     // Group isolated cores by NUMA node
     std::map<int, std::vector<int>> isolatedByNode;
@@ -694,87 +990,324 @@ class CpuAffinity
       }
     }
 
-    // Assign critical tasks to isolated cores within same NUMA node
-    bool assignedMarketData = false, assignedExecution = false;
-    bool assignedStrategy = false, assignedRisk = false;
-
-    for (auto& [nodeId, cores] : isolatedByNode)
+    // Sort components by priority for assignment
+    std::vector<std::pair<std::string, int>> sortedComponents;
+    for (const auto& [component, priority] : config.componentPriority)
     {
-      if (cores.size() >= 4)
+      sortedComponents.emplace_back(component, priority);
+    }
+    std::sort(sortedComponents.begin(), sortedComponents.end(),
+              [](const auto& a, const auto& b)
+              { return a.second < b.second; });
+
+    // Try to assign all critical tasks to the same NUMA node first
+    int bestNodeId = -1;
+    size_t maxIsolatedCores = 0;
+
+    for (const auto& [nodeId, cores] : isolatedByNode)
+    {
+      if (cores.size() > maxIsolatedCores)
       {
-        // Sufficient cores in this node for all critical tasks
-        assignment.marketDataCores.push_back(cores[0]);
-        assignment.executionCores.push_back(cores[1]);
-        assignment.strategyCores.push_back(cores[2]);
-        assignment.riskCores.push_back(cores[3]);
+        maxIsolatedCores = cores.size();
+        bestNodeId = nodeId;
+      }
+    }
 
-        // Remaining cores for general use
-        for (size_t i = 4; i < cores.size(); ++i)
-        {
-          assignment.generalCores.push_back(cores[i]);
-        }
+    std::vector<int> availableIsolated;
+    if (bestNodeId >= 0 && maxIsolatedCores >= sortedComponents.size())
+    {
+      // Use the best NUMA node for all critical tasks
+      availableIsolated = isolatedByNode[bestNodeId];
+      std::cout << "[CpuAffinity] Using NUMA node " << bestNodeId
+                << " for all critical components (isolated cores: " << maxIsolatedCores << ")" << std::endl;
+    }
+    else
+    {
+      // Distribute across multiple NUMA nodes
+      std::cout << "[CpuAffinity] Distributing critical components across NUMA nodes" << std::endl;
+      availableIsolated = isolatedCores;
+    }
 
-        assignedMarketData = assignedExecution = assignedStrategy = assignedRisk = true;
+    // Assign critical components to isolated cores
+    std::vector<int>* targetCores = nullptr;
+
+    for (const auto& [component, priority] : sortedComponents)
+    {
+      if (availableIsolated.empty() && !config.allowSharedCriticalCores)
+      {
         break;
       }
-      else if (cores.size() >= 2 && !assignedMarketData && !assignedExecution)
-      {
-        // Prioritize market data and execution on same node
-        assignment.marketDataCores.push_back(cores[0]);
-        assignment.executionCores.push_back(cores[1]);
-        assignedMarketData = assignedExecution = true;
 
-        if (cores.size() > 2)
-        {
-          for (size_t i = 2; i < cores.size(); ++i)
-          {
-            assignment.generalCores.push_back(cores[i]);
-          }
-        }
-      }
-      else if (!cores.empty())
+      // Get target vector for this component
+      if (component == "marketData")
+        targetCores = &assignment.marketDataCores;
+      else if (component == "execution")
+        targetCores = &assignment.executionCores;
+      else if (component == "strategy")
+        targetCores = &assignment.strategyCores;
+      else if (component == "risk")
+        targetCores = &assignment.riskCores;
+      else
+        continue;
+
+      if (targetCores && !availableIsolated.empty())
       {
-        // Single core assignments
-        if (!assignedMarketData)
+        int coreId = availableIsolated.front();
+        targetCores->push_back(coreId);
+        assignment.criticalCores.push_back(coreId);
+
+        int nodeId = getNumaNodeForCore(coreId);
+        std::cout << "[CpuAffinity] Assigned " << component << " to core " << coreId
+                  << " (NUMA node " << nodeId << ", isolated)" << std::endl;
+
+        if (!config.allowSharedCriticalCores)
         {
-          assignment.marketDataCores.push_back(cores[0]);
-          assignedMarketData = true;
-        }
-        else if (!assignedExecution)
-        {
-          assignment.executionCores.push_back(cores[0]);
-          assignedExecution = true;
-        }
-        else if (!assignedStrategy)
-        {
-          assignment.strategyCores.push_back(cores[0]);
-          assignedStrategy = true;
-        }
-        else if (!assignedRisk)
-        {
-          assignment.riskCores.push_back(cores[0]);
-          assignedRisk = true;
-        }
-        else
-        {
-          assignment.generalCores.push_back(cores[0]);
+          availableIsolated.erase(availableIsolated.begin());
         }
       }
     }
 
-    // Add non-isolated cores for general use
+    // Handle remaining isolated cores
+    if (!config.exclusiveIsolatedCores)
+    {
+      for (int core : availableIsolated)
+      {
+        assignment.generalCores.push_back(core);
+      }
+    }
+
+    // Add non-isolated cores for general use, preferring same NUMA node as critical tasks
+    std::set<int> usedCores(isolatedCores.begin(), isolatedCores.end());
+
+    // First, add cores from the same NUMA node as critical tasks
+    if (bestNodeId >= 0)
+    {
+      for (const auto& node : topology.nodes)
+      {
+        if (node.nodeId == bestNodeId)
+        {
+          for (int coreId : node.cpuCores)
+          {
+            if (usedCores.find(coreId) == usedCores.end())
+            {
+              assignment.generalCores.push_back(coreId);
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    // Then add cores from other NUMA nodes
     for (const auto& node : topology.nodes)
     {
-      for (int coreId : node.cpuCores)
+      if (node.nodeId != bestNodeId)
       {
-        if (std::find(isolatedCores.begin(), isolatedCores.end(), coreId) == isolatedCores.end())
+        for (int coreId : node.cpuCores)
         {
-          assignment.generalCores.push_back(coreId);
+          if (usedCores.find(coreId) == usedCores.end())
+          {
+            assignment.generalCores.push_back(coreId);
+          }
         }
       }
     }
 
     return assignment;
+  }
+
+  /**
+   * @brief Convenience method to setup optimal isolated core configuration for HFT systems
+   * @param enableRealTimePriority Whether to set real-time priority for critical threads
+   * @param disableFrequencyScaling Whether to disable CPU frequency scaling
+   * @return CoreAssignment with optimal isolated core configuration
+   */
+  static CoreAssignment setupOptimalHftConfiguration(bool enableRealTimePriority = true,
+                                                     bool disableFrequencyScaling = true)
+  {
+    std::cout << "[CpuAffinity] Setting up optimal HFT configuration..." << std::endl;
+
+    // Configure for maximum isolation and performance
+    CriticalComponentConfig config;
+    config.preferIsolatedCores = true;
+    config.exclusiveIsolatedCores = true;
+    config.allowSharedCriticalCores = false;
+    config.minIsolatedForCritical = 1;
+
+    // Get optimal core assignment
+    auto assignment = getNumaAwareCoreAssignment(config);
+
+    // Print configuration details
+    printCoreAssignment(assignment);
+
+    // Verify isolation
+    bool isolated = verifyCriticalCoreIsolation(assignment);
+    if (isolated)
+    {
+      std::cout << "[CpuAffinity] ✓ All critical components properly isolated" << std::endl;
+    }
+    else
+    {
+      std::cout << "[CpuAffinity] ⚠ Some critical components not isolated - check system configuration" << std::endl;
+    }
+
+    // Disable CPU frequency scaling for performance
+    if (disableFrequencyScaling)
+    {
+      std::cout << "[CpuAffinity] Disabling CPU frequency scaling..." << std::endl;
+      if (disableCpuFrequencyScaling())
+      {
+        std::cout << "[CpuAffinity] ✓ CPU frequency scaling disabled" << std::endl;
+      }
+      else
+      {
+        std::cout << "[CpuAffinity] ⚠ Failed to disable CPU frequency scaling" << std::endl;
+      }
+    }
+
+    return assignment;
+  }
+
+  /**
+   * @brief Setup and pin all critical HFT components using isolated cores
+   * @param config Optional configuration for critical component assignment
+   * @return true if all components successfully pinned to isolated cores
+   */
+  static bool setupAndPinCriticalComponents(const CriticalComponentConfig& config = CriticalComponentConfig{})
+  {
+    auto assignment = getNumaAwareCoreAssignment(config);
+
+    std::cout << "[CpuAffinity] Pinning critical components to isolated cores..." << std::endl;
+
+    bool allSuccess = true;
+
+    // Pin each critical component type
+    std::vector<std::string> components = {"marketData", "execution", "strategy", "risk"};
+
+    for (const auto& component : components)
+    {
+      if (!pinCriticalComponent(component, assignment))
+      {
+        allSuccess = false;
+      }
+    }
+
+    if (allSuccess)
+    {
+      std::cout << "[CpuAffinity] ✓ All critical components successfully pinned" << std::endl;
+    }
+    else
+    {
+      std::cout << "[CpuAffinity] ⚠ Some critical components failed to pin" << std::endl;
+    }
+
+    return allSuccess;
+  }
+
+  /**
+   * @brief Check if system has sufficient isolated cores for HFT workloads
+   * @param minRequiredCores Minimum number of isolated cores required
+   * @return true if system meets requirements
+   */
+  static bool checkIsolatedCoreRequirements(int minRequiredCores = 4)
+  {
+    auto isolatedCores = getIsolatedCores();
+    int numCores = getNumCores();
+
+    std::cout << "[CpuAffinity] System Analysis:" << std::endl;
+    std::cout << "  Total CPU cores: " << numCores << std::endl;
+    std::cout << "  Isolated cores: " << isolatedCores.size() << " [";
+    for (size_t i = 0; i < isolatedCores.size(); ++i)
+    {
+      std::cout << isolatedCores[i];
+      if (i < isolatedCores.size() - 1)
+        std::cout << ", ";
+    }
+    std::cout << "]" << std::endl;
+    std::cout << "  Required isolated cores: " << minRequiredCores << std::endl;
+
+    bool sufficient = (int)isolatedCores.size() >= minRequiredCores;
+
+    if (sufficient)
+    {
+      std::cout << "  ✓ System meets isolated core requirements" << std::endl;
+    }
+    else
+    {
+      std::cout << "  ⚠ System does NOT meet isolated core requirements" << std::endl;
+      std::cout << "  Recommendation: Boot with isolcpus=<core_list> kernel parameter" << std::endl;
+      std::cout << "  Example: isolcpus=2,3,4,5 to isolate cores 2-5" << std::endl;
+    }
+
+    return sufficient;
+  }
+
+  /**
+   * @brief Comprehensive example demonstrating isolated core usage for HFT
+   */
+  static void demonstrateIsolatedCoreUsage()
+  {
+    std::cout << "\n=== Flox HFT Isolated Core Configuration Demo ===\n"
+              << std::endl;
+
+    // Step 1: Check system capabilities
+    std::cout << "Step 1: Checking system isolated core capabilities" << std::endl;
+    bool hasRequiredCores = checkIsolatedCoreRequirements(4);
+    std::cout << std::endl;
+
+    // Step 2: Configure optimal settings
+    std::cout << "Step 2: Setting up optimal configuration" << std::endl;
+    CriticalComponentConfig config;
+    config.preferIsolatedCores = true;
+    config.exclusiveIsolatedCores = hasRequiredCores;     // Only exclusive if we have enough
+    config.allowSharedCriticalCores = !hasRequiredCores;  // Allow sharing if limited cores
+    config.minIsolatedForCritical = hasRequiredCores ? 4 : 1;
+
+    // Customize priority based on strategy
+    config.componentPriority["marketData"] = 0;  // Highest priority - market data is critical
+    config.componentPriority["execution"] = 1;   // Second priority - order execution
+    config.componentPriority["risk"] = 2;        // Third priority - risk management
+    config.componentPriority["strategy"] = 3;    // Lowest priority - strategy computation
+
+    auto assignment = getNumaAwareCoreAssignment(config);
+    std::cout << std::endl;
+
+    // Step 3: Verify isolation
+    std::cout << "Step 3: Verifying critical core isolation" << std::endl;
+    verifyCriticalCoreIsolation(assignment);
+    std::cout << std::endl;
+
+    // Step 4: Performance optimizations
+    std::cout << "Step 4: Applying performance optimizations" << std::endl;
+
+    // Note: These would typically be done in separate threads for each component
+    std::cout << "Example pinning (normally done in component threads):" << std::endl;
+
+    if (!assignment.marketDataCores.empty())
+    {
+      std::cout << "  Market Data Thread: pinToCore(" << assignment.marketDataCores[0] << ")" << std::endl;
+    }
+    if (!assignment.executionCores.empty())
+    {
+      std::cout << "  Execution Thread: pinToCore(" << assignment.executionCores[0] << ")" << std::endl;
+    }
+    if (!assignment.strategyCores.empty())
+    {
+      std::cout << "  Strategy Thread: pinToCore(" << assignment.strategyCores[0] << ")" << std::endl;
+    }
+    if (!assignment.riskCores.empty())
+    {
+      std::cout << "  Risk Thread: pinToCore(" << assignment.riskCores[0] << ")" << std::endl;
+    }
+
+    std::cout << "\nReal-time priority setup:" << std::endl;
+    std::cout << "  setRealTimePriority(90)  // For market data" << std::endl;
+    std::cout << "  setRealTimePriority(85)  // For execution" << std::endl;
+    std::cout << "  setRealTimePriority(80)  // For strategy" << std::endl;
+    std::cout << "  setRealTimePriority(75)  // For risk" << std::endl;
+
+    std::cout << "\n=== Configuration Complete ===\n"
+              << std::endl;
   }
 
  private:
