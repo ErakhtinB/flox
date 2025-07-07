@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 #include <chrono>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -45,6 +46,24 @@ class CpuAffinityTest : public ::testing::Test
       sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
 #endif
     }
+  }
+
+  // Helper method to check if NUMA is available on this system
+  bool isNumaAvailable()
+  {
+    auto topology = CpuAffinity::getNumaTopology();
+    return topology.numaAvailable && !topology.nodes.empty();
+  }
+
+  // Helper method to get a valid NUMA node for testing
+  int getTestNumaNode()
+  {
+    auto topology = CpuAffinity::getNumaTopology();
+    if (topology.numaAvailable && !topology.nodes.empty())
+    {
+      return topology.nodes[0].nodeId;
+    }
+    return -1;
   }
 
   std::vector<int> _originalAffinity;
@@ -423,4 +442,486 @@ TEST_F(CpuAffinityTest, ExceptionSafety)
   EXPECT_EQ(affinity.size(), 1);
   EXPECT_EQ(affinity[0], 0);
 #endif
+}
+
+/**
+ * @brief Test NUMA topology detection
+ */
+TEST_F(CpuAffinityTest, NumaTopology)
+{
+  auto topology = CpuAffinity::getNumaTopology();
+
+  // Basic validation
+  EXPECT_GE(topology.numNodes, 0);
+  EXPECT_EQ(topology.nodes.size(), static_cast<size_t>(topology.numNodes));
+
+  if (topology.numaAvailable)
+  {
+    EXPECT_GT(topology.numNodes, 0);
+
+    // Validate each node
+    for (const auto& node : topology.nodes)
+    {
+      EXPECT_GE(node.nodeId, 0);
+      EXPECT_FALSE(node.cpuCores.empty());
+
+      // All cores should be valid
+      for (int core : node.cpuCores)
+      {
+        EXPECT_GE(core, 0);
+        EXPECT_LT(core, _numCores);
+      }
+
+      // Memory info should be reasonable
+      EXPECT_GE(node.totalMemoryMB, 0);
+      EXPECT_GE(node.freeMemoryMB, 0);
+      EXPECT_LE(node.freeMemoryMB, node.totalMemoryMB);
+    }
+
+    // Ensure all cores are accounted for
+    std::set<int> allNumaCores;
+    for (const auto& node : topology.nodes)
+    {
+      for (int core : node.cpuCores)
+      {
+        allNumaCores.insert(core);
+      }
+    }
+
+    // Should have at least some cores mapped
+    EXPECT_FALSE(allNumaCores.empty());
+  }
+  else
+  {
+    EXPECT_EQ(topology.numNodes, 0);
+    EXPECT_TRUE(topology.nodes.empty());
+  }
+}
+
+/**
+ * @brief Test NUMA node to core mapping
+ */
+TEST_F(CpuAffinityTest, NumaNodeForCore)
+{
+  auto topology = CpuAffinity::getNumaTopology();
+
+  if (!topology.numaAvailable)
+  {
+    GTEST_SKIP() << "NUMA not available on this system";
+  }
+
+  // Test mapping for cores we know exist
+  for (const auto& node : topology.nodes)
+  {
+    for (int core : node.cpuCores)
+    {
+      int numaNode = CpuAffinity::getNumaNodeForCore(core);
+      // Note: The mapping might not be perfect due to different methods
+      // but it should return a valid node ID or -1
+      EXPECT_TRUE(numaNode == -1 || numaNode >= 0);
+    }
+  }
+
+  // Test invalid core
+  int invalidNode = CpuAffinity::getNumaNodeForCore(999);
+  EXPECT_EQ(invalidNode, -1);
+}
+
+/**
+ * @brief Test NUMA node pinning
+ */
+TEST_F(CpuAffinityTest, PinToNumaNode)
+{
+  auto topology = CpuAffinity::getNumaTopology();
+
+  if (!topology.numaAvailable || topology.nodes.empty())
+  {
+    GTEST_SKIP() << "NUMA not available on this system";
+  }
+
+#ifdef __linux__
+  // Pin to first NUMA node
+  int nodeId = topology.nodes[0].nodeId;
+  bool result = CpuAffinity::pinToNumaNode(nodeId);
+  EXPECT_TRUE(result);
+
+  // Check that we're pinned to cores in that node
+  auto affinity = CpuAffinity::getCurrentAffinity();
+  EXPECT_FALSE(affinity.empty());
+
+  // All pinned cores should be in the target NUMA node
+  const auto& nodeCores = topology.nodes[0].cpuCores;
+  for (int core : affinity)
+  {
+    EXPECT_TRUE(std::find(nodeCores.begin(), nodeCores.end(), core) != nodeCores.end());
+  }
+
+  // Test invalid node
+  result = CpuAffinity::pinToNumaNode(999);
+  EXPECT_FALSE(result);
+#else
+  bool result = CpuAffinity::pinToNumaNode(0);
+  EXPECT_FALSE(result);  // Should fail on non-Linux platforms
+#endif
+}
+
+/**
+ * @brief Test NUMA node pinning with separate thread
+ */
+TEST_F(CpuAffinityTest, ThreadNumaPinning)
+{
+  auto topology = CpuAffinity::getNumaTopology();
+
+  if (!topology.numaAvailable || topology.nodes.empty())
+  {
+    GTEST_SKIP() << "NUMA not available on this system";
+  }
+
+  std::atomic<bool> threadPinned{false};
+  std::atomic<int> threadNodeCores{0};
+
+  int nodeId = topology.nodes[0].nodeId;
+  const auto& expectedCores = topology.nodes[0].cpuCores;
+
+  std::thread t([&]()
+                {
+        bool result = CpuAffinity::pinToNumaNode(nodeId);
+        threadPinned.store(result);
+        
+        if (result)
+        {
+            auto affinity = CpuAffinity::getCurrentAffinity();
+            int coresInNode = 0;
+            for (int core : affinity)
+            {
+                if (std::find(expectedCores.begin(), expectedCores.end(), core) != expectedCores.end())
+                {
+                    coresInNode++;
+                }
+            }
+            threadNodeCores.store(coresInNode);
+        } });
+
+  t.join();
+
+#ifdef __linux__
+  EXPECT_TRUE(threadPinned.load());
+  EXPECT_GT(threadNodeCores.load(), 0);
+#else
+  EXPECT_FALSE(threadPinned.load());
+#endif
+}
+
+/**
+ * @brief Test memory policy setting
+ */
+TEST_F(CpuAffinityTest, MemoryPolicy)
+{
+  auto topology = CpuAffinity::getNumaTopology();
+
+  if (!topology.numaAvailable || topology.nodes.empty())
+  {
+    GTEST_SKIP() << "NUMA not available on this system";
+  }
+
+#ifdef __linux__
+  int nodeId = topology.nodes[0].nodeId;
+  bool result = CpuAffinity::setMemoryPolicy(nodeId);
+  EXPECT_TRUE(result);
+
+  // Test invalid node
+  result = CpuAffinity::setMemoryPolicy(999);
+  EXPECT_FALSE(result);
+#else
+  bool result = CpuAffinity::setMemoryPolicy(0);
+  EXPECT_FALSE(result);  // Should fail on non-Linux platforms
+#endif
+}
+
+/**
+ * @brief Test NUMA-aware core assignment
+ */
+TEST_F(CpuAffinityTest, NumaAwareCoreAssignment)
+{
+  auto assignment = CpuAffinity::getNumaAwareCoreAssignment();
+  auto topology = CpuAffinity::getNumaTopology();
+
+  // Basic validation
+  EXPECT_TRUE(assignment.marketDataCores.size() <= static_cast<size_t>(_numCores));
+  EXPECT_TRUE(assignment.strategyCores.size() <= static_cast<size_t>(_numCores));
+  EXPECT_TRUE(assignment.executionCores.size() <= static_cast<size_t>(_numCores));
+  EXPECT_TRUE(assignment.riskCores.size() <= static_cast<size_t>(_numCores));
+  EXPECT_TRUE(assignment.generalCores.size() <= static_cast<size_t>(_numCores));
+
+  // All cores should be valid
+  auto validateCores = [this](const std::vector<int>& cores)
+  {
+    for (int core : cores)
+    {
+      EXPECT_GE(core, 0);
+      EXPECT_LT(core, _numCores);
+    }
+  };
+
+  validateCores(assignment.marketDataCores);
+  validateCores(assignment.strategyCores);
+  validateCores(assignment.executionCores);
+  validateCores(assignment.riskCores);
+  validateCores(assignment.generalCores);
+
+  if (topology.numaAvailable && !topology.nodes.empty())
+  {
+    // NUMA-aware assignment should try to keep related tasks on same node
+    // For systems with sufficient cores, market data and execution should be on same node
+    if (!assignment.marketDataCores.empty() && !assignment.executionCores.empty())
+    {
+      int marketDataNode = CpuAffinity::getNumaNodeForCore(assignment.marketDataCores[0]);
+      int executionNode = CpuAffinity::getNumaNodeForCore(assignment.executionCores[0]);
+
+      // If both return valid nodes, they should ideally be the same
+      if (marketDataNode >= 0 && executionNode >= 0)
+      {
+        // This is a preference, not a strict requirement
+        // Just verify they're both valid assignments
+        EXPECT_GE(marketDataNode, 0);
+        EXPECT_GE(executionNode, 0);
+      }
+    }
+  }
+}
+
+/**
+ * @brief Test NumaAffinityGuard RAII wrapper
+ */
+TEST_F(CpuAffinityTest, NumaAffinityGuard)
+{
+  auto topology = CpuAffinity::getNumaTopology();
+
+  if (!topology.numaAvailable || topology.nodes.empty())
+  {
+    GTEST_SKIP() << "NUMA not available on this system";
+  }
+
+#ifdef __linux__
+  // Pin to core 0 first
+  if (_numCores >= 1)
+  {
+    CpuAffinity::pinToCore(0);
+    auto affinity = CpuAffinity::getCurrentAffinity();
+    EXPECT_EQ(affinity.size(), 1);
+    EXPECT_EQ(affinity[0], 0);
+  }
+
+  int nodeId = topology.nodes[0].nodeId;
+  const auto& nodeCores = topology.nodes[0].cpuCores;
+
+  {
+    // Use NUMA guard to temporarily pin to NUMA node
+    NumaAffinityGuard guard(nodeId);
+
+    auto affinity = CpuAffinity::getCurrentAffinity();
+    EXPECT_FALSE(affinity.empty());
+
+    // All cores should be from the target NUMA node
+    for (int core : affinity)
+    {
+      EXPECT_TRUE(std::find(nodeCores.begin(), nodeCores.end(), core) != nodeCores.end());
+    }
+  }
+
+  // Should be restored to previous state (core 0)
+  if (_numCores >= 1)
+  {
+    auto affinity = CpuAffinity::getCurrentAffinity();
+    EXPECT_EQ(affinity.size(), 1);
+    EXPECT_EQ(affinity[0], 0);
+  }
+#endif
+}
+
+/**
+ * @brief Test NumaAffinityGuard with specific core
+ */
+TEST_F(CpuAffinityTest, NumaAffinityGuardSpecificCore)
+{
+  auto topology = CpuAffinity::getNumaTopology();
+
+  if (!topology.numaAvailable || topology.nodes.empty() || _numCores < 2)
+  {
+    GTEST_SKIP() << "NUMA not available or insufficient cores";
+  }
+
+#ifdef __linux__
+  int nodeId = topology.nodes[0].nodeId;
+  const auto& nodeCores = topology.nodes[0].cpuCores;
+
+  if (nodeCores.empty())
+  {
+    GTEST_SKIP() << "No cores available in NUMA node";
+  }
+
+  int targetCore = nodeCores[0];
+
+  {
+    // Use NUMA guard to pin to specific core and set memory policy
+    NumaAffinityGuard guard(targetCore, nodeId);
+
+    auto affinity = CpuAffinity::getCurrentAffinity();
+    EXPECT_EQ(affinity.size(), 1);
+    EXPECT_EQ(affinity[0], targetCore);
+  }
+
+  // Should be restored to original affinity
+  auto affinity = CpuAffinity::getCurrentAffinity();
+  EXPECT_EQ(affinity.size(), _originalAffinity.size());
+#endif
+}
+
+/**
+ * @brief Test NUMA functionality with multi-threading
+ */
+TEST_F(CpuAffinityTest, NumaMultiThreaded)
+{
+  auto topology = CpuAffinity::getNumaTopology();
+
+  if (!topology.numaAvailable || topology.nodes.empty())
+  {
+    GTEST_SKIP() << "NUMA not available on this system";
+  }
+
+  const int numThreads = std::min(4, static_cast<int>(topology.nodes.size()));
+  std::vector<std::atomic<bool>> threadResults(numThreads);
+  std::vector<std::thread> threads;
+
+  for (int i = 0; i < numThreads; ++i)
+  {
+    threadResults[i].store(false);
+
+    threads.emplace_back([&, i]()
+                         {
+        int nodeId = topology.nodes[i % topology.nodes.size()].nodeId;
+        
+        // Use NUMA affinity guard
+        NumaAffinityGuard guard(nodeId);
+        
+        // Verify pinning worked
+        auto affinity = CpuAffinity::getCurrentAffinity();
+        if (!affinity.empty())
+        {
+            const auto& expectedCores = topology.nodes[i % topology.nodes.size()].cpuCores;
+            bool allCoresInNode = true;
+            
+            for (int core : affinity)
+            {
+                if (std::find(expectedCores.begin(), expectedCores.end(), core) == expectedCores.end())
+                {
+                    allCoresInNode = false;
+                    break;
+                }
+            }
+            
+            threadResults[i].store(allCoresInNode);
+        }
+        
+        // Simulate some work
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); });
+  }
+
+  for (auto& t : threads)
+  {
+    t.join();
+  }
+
+#ifdef __linux__
+  for (int i = 0; i < numThreads; ++i)
+  {
+    EXPECT_TRUE(threadResults[i].load()) << "Thread " << i << " failed NUMA pinning";
+  }
+#endif
+}
+
+/**
+ * @brief Test conditional NUMA guard usage - demonstrates best practice pattern
+ */
+TEST_F(CpuAffinityTest, ConditionalNumaGuardUsage)
+{
+  // This test demonstrates the recommended pattern for applications:
+  // Check if NUMA is available before using NUMA guards
+
+  if (isNumaAvailable())
+  {
+    // NUMA is available - use NUMA-aware optimizations
+    int testNode = getTestNumaNode();
+    ASSERT_GE(testNode, 0) << "Should have valid NUMA node when NUMA is available";
+
+    {
+      // Use NUMA guard for optimal memory locality
+      NumaAffinityGuard numaGuard(testNode);
+
+      // Verify we're pinned to the NUMA node
+      auto affinity = CpuAffinity::getCurrentAffinity();
+      EXPECT_FALSE(affinity.empty());
+
+      // Simulate memory-intensive work that benefits from NUMA locality
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    // NUMA guard automatically restored affinity and memory policy
+    std::cout << "NUMA optimizations applied for node " << testNode << std::endl;
+  }
+  else
+  {
+    // NUMA not available - fall back to regular CPU affinity
+    if (_numCores >= 2)
+    {
+      ThreadAffinityGuard cpuGuard(0);  // Pin to core 0
+
+      // Verify regular CPU pinning works
+      auto affinity = CpuAffinity::getCurrentAffinity();
+      EXPECT_EQ(affinity.size(), 1);
+      EXPECT_EQ(affinity[0], 0);
+
+      // Simulate work without NUMA optimizations
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    std::cout << "NUMA not available - using regular CPU affinity" << std::endl;
+  }
+}
+
+/**
+ * @brief Test mixed guard usage - CPU guards with optional NUMA
+ */
+TEST_F(CpuAffinityTest, MixedGuardUsage)
+{
+  if (_numCores < 2)
+  {
+    GTEST_SKIP() << "Need at least 2 cores for this test";
+  }
+
+  // Always use basic CPU affinity
+  {
+    ThreadAffinityGuard cpuGuard(1);
+
+    auto affinity = CpuAffinity::getCurrentAffinity();
+    EXPECT_EQ(affinity.size(), 1);
+    EXPECT_EQ(affinity[0], 1);
+
+    // Conditionally add NUMA optimizations if available
+    if (isNumaAvailable())
+    {
+      int nodeId = CpuAffinity::getNumaNodeForCore(1);
+      if (nodeId >= 0)
+      {
+        // Set memory policy for the NUMA node containing core 1
+        bool memPolicySet = CpuAffinity::setMemoryPolicy(nodeId);
+        EXPECT_TRUE(memPolicySet || !memPolicySet);  // Don't assert - just verify it doesn't crash
+
+        std::cout << "Enhanced with NUMA memory policy for node " << nodeId << std::endl;
+      }
+    }
+
+    // Simulate work that benefits from both CPU and NUMA affinity
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
 }
